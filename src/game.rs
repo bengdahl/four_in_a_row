@@ -71,7 +71,7 @@ impl GameModel {
             }
 
             Entry::Vacant(e) => {
-                let mut challenge_message = channel
+                let challenge_message = channel
                     .send_message(&ctx, |msg| {
                         msg.content(format!(
                             "{} has been challenged to a game by {}!\n\nThis invite will expire in 60 seconds.",
@@ -80,8 +80,12 @@ impl GameModel {
                         ))
                         .reactions([DENY_CHALLENGE, ACCEPT_CHALLENGE].iter().map(|c| c.clone()))
                     })
-                    .await
-                    .unwrap();
+                    .await;
+                
+                let mut challenge_message = match challenge_message {
+                    Ok(msg) => msg,
+                    Err(_) => return
+                };
 
                 let challenger_id = challenger.id;
                 let opponent_id = opponent.id;
@@ -398,14 +402,19 @@ async fn game(mut recv: tokio::sync::mpsc::Receiver<GameAction>, ctx: Context, c
         board: [[GameCell::Empty; 6]; 7],
     };
 
-    let mut board_message = channel.send_message(
+    let board_message = channel.send_message(
         &ctx.http, 
         |msg|
             msg.content(game_state.message_content())
                 .reactions(NUMBER_EMOTES.iter().take(7).map(|&s| {
                     ReactionType::Unicode(String::from(s))
                 }))
-    ).await.unwrap();
+    ).await;
+
+    let mut board_message = match board_message {
+        Ok(msg) => msg,
+        Err(_) => return
+    };
 
     loop {
         let current_player_id = game_state.current_player().id;

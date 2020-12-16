@@ -46,7 +46,7 @@ impl EventHandler for Handler {
                 }
 
                 ParseCommandError::InvalidCommand(_) => {
-                    let _ = new_message.react(&ctx.http, '❓').await.unwrap();
+                    let _ = new_message.react(&ctx.http, '❓').await;
                 }
             },
         }
