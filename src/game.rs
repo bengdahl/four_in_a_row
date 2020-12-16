@@ -1,11 +1,10 @@
 use crate::command::Command;
-use futures::{
-    FutureExt,
-    stream::StreamExt,
-};
-use serenity::{collector::ReactionAction, model::prelude::*};
+use futures::stream::StreamExt;
+use serenity::model::prelude::*;
 use serenity::prelude::*;
+use smallvec::SmallVec;
 use std::{collections::hash_map::{Entry, HashMap}};
+use itertools::Itertools;
 
 const DENY_CHALLENGE: char = '❌';
 const ACCEPT_CHALLENGE: char = '✅';
@@ -177,12 +176,20 @@ struct GameState {
 }
 
 impl GameState {
-    /// Writes out the game state as 
+    fn current_player(&self) -> &User {
+        if self.reds_turn {
+            &self.red_player
+        } else {
+            &self.yellow_player
+        }
+    }
+
+    /// Writes out the game state as a discord message
     fn message_content(&self) -> String {
         format!(
             "*Move timeout: {move_timeout} seconds*\n\
-             {red_player}: {red_piece_emote}\n\
-             {yellow_player}: {yellow_piece_emote}\n\n\
+             `[{reds_turn}]` {red_player}: {red_piece_emote}\n\
+             `[{yellows_turn}]` {yellow_player}: {yellow_piece_emote}\n\n\
              {board}",
             
             move_timeout = self.config.move_timeout.as_secs(),
@@ -190,13 +197,147 @@ impl GameState {
             yellow_player = self.yellow_player.mention(),
             red_piece_emote = RED_PIECE,
             yellow_piece_emote = YELLOW_PIECE,
-            board = "",
+            reds_turn = if self.reds_turn {"*"} else {" "},
+            yellows_turn = if !self.reds_turn {"*"} else {" "},
+            board = self.display_board(),
         )
     }
 
-    /// The current player places a piece in column 
+    fn display_board(&self) -> String {
+        let mut s = String::new();
+        // s.push_str("```\n");
+        for r in (0..6).rev() {
+            for c in 0..7 {
+                s.push(match self.board[c][r] {
+                    GameCell::Empty => BLANK_CELL,
+                    GameCell::Red => RED_PIECE,
+                    GameCell::Yellow => YELLOW_PIECE,
+                });
+            }
+            s.push('\n');
+        }
+        // s.push_str("```\n");
+        s
+    }
+
+    /// The current player places a piece in the specified column
+    /// 
+    /// Returns `MoveOutcome::Illegal` if the specified column is full
+    /// 
+    /// # Panic
+    /// Panics if `column` is outside of [0,6]
     fn play_move(&mut self, column: usize) -> MoveOutcome {
-        todo!()
+        let color = if self.reds_turn { GameCell::Red } else { GameCell::Yellow };
+
+        let row = self.board[column].iter().take_while(|c| **c != GameCell::Empty).count();
+        if row == 6 {
+            return MoveOutcome::Illegal;
+        }
+
+        self.board[column][row] = color;
+
+        let outcome = self.check_move(row, column);
+        
+        if outcome == MoveOutcome::Continue {
+            self.reds_turn = !self.reds_turn;
+        }
+
+        outcome
+    }
+
+    /// Checks if the specified checker is part of a winning move
+    /// 
+    /// # Panic
+    /// Panics if the specified checker is out of bounds or empty
+    fn check_move(&self, row: usize, column: usize) -> MoveOutcome {
+        // Check the column for vertical victory
+        let vert_groups = self.board[column].iter().group_by(|&&c| c);
+        for (_, g) in vert_groups.into_iter() {
+            let g = g.collect::<SmallVec<[&GameCell; 6]>>();
+            if *g[0] != GameCell::Empty && g.len() >= 4 {
+                return if *g[0] == GameCell::Red {
+                    MoveOutcome::RedWins
+                } else if *g[0] == GameCell::Yellow {
+                    MoveOutcome::YellowWins
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+
+        // Check the row for horizontal victory
+        let horiz_groups = (0..7).into_iter()
+            .map(|i| self.board[i][row])
+            .group_by(|&c| c);
+        for (_, g) in horiz_groups.into_iter() {
+            let g = g.collect::<SmallVec<[GameCell; 7]>>();
+            if g[0] != GameCell::Empty && g.len() >= 4 {
+                return if g[0] == GameCell::Red {
+                    MoveOutcome::RedWins
+                } else if g[0] == GameCell::Yellow {
+                    MoveOutcome::YellowWins
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+
+        // Check the northwest diagonal for victory
+        let nw_groups = (-4..4).into_iter()
+            .map(|i| 
+                if column as isize+i < 0 || row as isize+i < 0 {
+                    None
+                } else {
+                    self.board.get((column as isize+i) as usize)
+                        .and_then(|r| 
+                            r.get((row as isize+i) as usize))
+                        .copied()
+                })
+            .group_by(|&c| c);
+        for (_, g) in nw_groups.into_iter() {
+            let g = g.collect::<SmallVec<[Option<GameCell>; 8]>>();
+            if g[0] != Some(GameCell::Empty) && g[0] != None && g.len() >= 4 {
+                return if g[0] == Some(GameCell::Red) {
+                    MoveOutcome::RedWins
+                } else if g[0] == Some(GameCell::Yellow) {
+                    MoveOutcome::YellowWins
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+
+        // Check the northeast diagonal for victory
+        let ne_groups = (-4..4).into_iter()
+            .map(|i| 
+                if column as isize+i < 0 || row as isize-i < 0 {
+                    None
+                } else {
+                    self.board.get((column as isize+i) as usize)
+                        .and_then(|r| 
+                            r.get((row as isize-i) as usize))
+                        .copied()
+                })
+            .group_by(|&c| c);
+        for (_, g) in ne_groups.into_iter() {
+            let g = g.collect::<SmallVec<[Option<GameCell>; 8]>>();
+            if g[0] != Some(GameCell::Empty) && g[0] != None && g.len() >= 4 {
+                return if g[0] == Some(GameCell::Red) {
+                    MoveOutcome::RedWins
+                } else if g[0] == Some(GameCell::Yellow) {
+                    MoveOutcome::YellowWins
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+
+        // Finally, check for a draw
+        if !self.board.iter().flatten().any(|&c| c == GameCell::Empty) {
+            return MoveOutcome::Draw
+        }
+
+        MoveOutcome::Continue
     }
 }
 
@@ -221,7 +362,7 @@ impl std::fmt::Display for GameCell {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum MoveOutcome {
     RedWins,
     YellowWins,
@@ -267,7 +408,7 @@ async fn game(mut recv: tokio::sync::mpsc::Receiver<GameAction>, ctx: Context, c
     ).await.unwrap();
 
     loop {
-        let current_player_id = if game_state.reds_turn {game_state.red_player.id} else {game_state.yellow_player.id};
+        let current_player_id = game_state.current_player().id;
         let react_watch = board_message
             .await_reaction(&ctx.shard)
             .author_id(current_player_id)
@@ -283,7 +424,16 @@ async fn game(mut recv: tokio::sync::mpsc::Receiver<GameAction>, ctx: Context, c
                 Some(GameAction::ForceDraw) | None => break, // Game forcefully closed prematurely
             },
             r = react_watch => match r {
-                None => break, // Timeout
+                None => { // Timeout
+                    let _ = board_message.edit(&ctx.http, |msg|
+                        msg.content(format!(
+                            "{}\n**Game over! {} forfeits. (timed out)**",
+                            game_state.message_content(),
+                            game_state.current_player().mention()
+                    ))).await;
+
+                    break
+                },
                 Some(r) => {
                     let r = r.as_inner_ref();
                     let emoji = match &r.emoji {
@@ -296,10 +446,22 @@ async fn game(mut recv: tokio::sync::mpsc::Receiver<GameAction>, ctx: Context, c
                         })
                         .unwrap();
                     match game_state.play_move(col) {
-                        MoveOutcome::RedWins => todo!(),
-                        MoveOutcome::YellowWins => todo!(),
-                        MoveOutcome::Draw => todo!(),
-                        MoveOutcome::Continue | MoveOutcome::Illegal => {}
+                        MoveOutcome::Continue | MoveOutcome::Illegal => {},
+                        winner => {
+                            let _ = board_message.edit(&ctx.http, |msg|
+                                msg.content(format!(
+                                    "{}\n{}",
+                                    game_state.message_content(),
+                                    match winner {
+                                        MoveOutcome::RedWins => format!("**Game over! {} wins!**", game_state.red_player.mention()),
+                                        MoveOutcome::YellowWins => format!("**Game over! {} wins!**", game_state.yellow_player.mention()),
+                                        MoveOutcome::Draw => format!("**Game over! Draw!**"),
+                                        _ => unreachable!()
+                                    }
+                            ))).await;
+
+                            break
+                        }
                     };
 
                     // TODO: Detect if `Manage Messages` is enabled
@@ -309,7 +471,6 @@ async fn game(mut recv: tokio::sync::mpsc::Receiver<GameAction>, ctx: Context, c
                         msg.content(game_state.message_content())
                     ).await.unwrap();
                 },
-                _ => unreachable!()
             }
         };
     }
