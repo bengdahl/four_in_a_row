@@ -6,6 +6,9 @@ use smallvec::SmallVec;
 use std::{collections::hash_map::{Entry, HashMap}};
 use itertools::Itertools;
 
+const BOARD_HEIGHT: usize = 6;
+const BOARD_WIDTH: usize = 7;
+
 const DENY_CHALLENGE: char = '❌';
 const ACCEPT_CHALLENGE: char = '✅';
 const RED_PIECE: char = '🔴';
@@ -175,7 +178,7 @@ struct GameState {
     reds_turn: bool,
     red_player: User,
     yellow_player: User,
-    board: [[GameCell; 6]; 7],
+    board: [[GameCell; BOARD_HEIGHT]; BOARD_WIDTH],
     config: GameConfig
 }
 
@@ -210,8 +213,8 @@ impl GameState {
     fn display_board(&self) -> String {
         let mut s = String::new();
         // s.push_str("```\n");
-        for r in (0..6).rev() {
-            for c in 0..7 {
+        for r in (0..BOARD_HEIGHT).rev() {
+            for c in 0..BOARD_WIDTH {
                 s.push(match self.board[c][r] {
                     GameCell::Empty => BLANK_CELL,
                     GameCell::Red => RED_PIECE,
@@ -229,12 +232,12 @@ impl GameState {
     /// Returns `MoveOutcome::Illegal` if the specified column is full
     /// 
     /// # Panic
-    /// Panics if `column` is outside of [0,6]
+    /// Panics if `column` is outside of [0,BOARD_WIDTH)
     fn play_move(&mut self, column: usize) -> MoveOutcome {
         let color = if self.reds_turn { GameCell::Red } else { GameCell::Yellow };
 
         let row = self.board[column].iter().take_while(|c| **c != GameCell::Empty).count();
-        if row == 6 {
+        if row >= 6 {
             return MoveOutcome::Illegal;
         }
 
@@ -257,7 +260,7 @@ impl GameState {
         // Check the column for vertical victory
         let vert_groups = self.board[column].iter().group_by(|&&c| c);
         for (_, g) in vert_groups.into_iter() {
-            let g = g.collect::<SmallVec<[&GameCell; 6]>>();
+            let g = g.collect::<SmallVec<[&GameCell; BOARD_HEIGHT]>>();
             if *g[0] != GameCell::Empty && g.len() >= 4 {
                 return if *g[0] == GameCell::Red {
                     MoveOutcome::RedWins
@@ -274,7 +277,7 @@ impl GameState {
             .map(|i| self.board[i][row])
             .group_by(|&c| c);
         for (_, g) in horiz_groups.into_iter() {
-            let g = g.collect::<SmallVec<[GameCell; 7]>>();
+            let g = g.collect::<SmallVec<[GameCell; BOARD_WIDTH]>>();
             if g[0] != GameCell::Empty && g.len() >= 4 {
                 return if g[0] == GameCell::Red {
                     MoveOutcome::RedWins
@@ -351,6 +354,14 @@ struct GameConfig {
     move_timeout: std::time::Duration,
 }
 
+impl Default for GameConfig {
+    fn default() -> Self {
+        GameConfig {
+            move_timeout: std::time::Duration::from_secs(120)
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum GameCell {
     Empty, Red, Yellow
@@ -389,24 +400,21 @@ async fn game(mut recv: tokio::sync::mpsc::Receiver<GameAction>, ctx: Context, c
     } else {
         (opponent, challenger)
     };
-    let move_timeout = std::time::Duration::from_secs(120);
 
     let mut game_state = GameState {
-        config: GameConfig {
-            move_timeout
-        },
+        config: GameConfig::default(),
 
         red_player, yellow_player,
         reds_turn: true,
 
-        board: [[GameCell::Empty; 6]; 7],
+        board: [[GameCell::Empty; BOARD_HEIGHT]; BOARD_WIDTH],
     };
 
     let board_message = channel.send_message(
         &ctx.http, 
         |msg|
             msg.content(game_state.message_content())
-                .reactions(NUMBER_EMOTES.iter().take(7).map(|&s| {
+                .reactions(NUMBER_EMOTES.iter().take(BOARD_WIDTH).map(|&s| {
                     ReactionType::Unicode(String::from(s))
                 }))
     ).await;
@@ -423,7 +431,7 @@ async fn game(mut recv: tokio::sync::mpsc::Receiver<GameAction>, ctx: Context, c
             .author_id(current_player_id)
             .filter(|r| {
                 if let ReactionType::Unicode(e) = &r.emoji {
-                    NUMBER_EMOTES[..7].contains(&&e[..])
+                    NUMBER_EMOTES[..BOARD_WIDTH].contains(&&e[..])
                 } else { false }
             })
             .timeout(game_state.config.move_timeout);
@@ -482,5 +490,130 @@ async fn game(mut recv: tokio::sync::mpsc::Receiver<GameAction>, ctx: Context, c
                 },
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn horizontal_win() {
+        for color in &[GameCell::Red, GameCell::Yellow] {
+            for y in 0..BOARD_HEIGHT {
+                for x in 0..(BOARD_WIDTH-3) {
+                    let mut board = [[GameCell::Empty; BOARD_HEIGHT]; BOARD_WIDTH];
+                    for c in x..x+4 {
+                        board[c][y] = *color;
+                    }
+
+                    let game = GameState {
+                        board,
+                        config: GameConfig::default(),
+                        red_player: User::default(),
+                        yellow_player: User::default(),
+                        reds_turn: true,
+                    };
+
+                    for c in x..x+4 {
+                        assert_eq!(game.check_move(y, c), if *color == GameCell::Yellow {
+                            MoveOutcome::YellowWins
+                        } else {
+                            MoveOutcome::RedWins
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_win() {
+        for color in &[GameCell::Red, GameCell::Yellow] {
+            for y in 0..(BOARD_HEIGHT-3) {
+                for x in 0..BOARD_WIDTH {
+                    let mut board = [[GameCell::Empty; BOARD_HEIGHT]; BOARD_WIDTH];
+                    for r in y..y+4 {
+                        board[x][r] = *color;
+                    }
+
+                    let game = GameState {
+                        board,
+                        config: GameConfig::default(),
+                        red_player: User::default(),
+                        yellow_player: User::default(),
+                        reds_turn: true,
+                    };
+
+                    for r in y..y+4 {
+                        assert_eq!(game.check_move(r, x), if *color == GameCell::Yellow {
+                            MoveOutcome::YellowWins
+                        } else {
+                            MoveOutcome::RedWins
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nw_diagonal_win() {
+        for color in &[GameCell::Red, GameCell::Yellow] {
+            for y in 0..(BOARD_HEIGHT-3) {
+                for x in 0..(BOARD_WIDTH-3) {
+                    let mut board = [[GameCell::Empty; BOARD_HEIGHT]; BOARD_WIDTH];
+                    for i in 0..4 {
+                        board[x+i][y+i] = *color;
+                    }
+
+                    let game = GameState {
+                        board,
+                        config: GameConfig::default(),
+                        red_player: User::default(),
+                        yellow_player: User::default(),
+                        reds_turn: true,
+                    };
+
+                    for i in 0..4 {
+                        assert_eq!(game.check_move(y+i, x+i), if *color == GameCell::Yellow {
+                            MoveOutcome::YellowWins
+                        } else {
+                            MoveOutcome::RedWins
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ne_diagonal_win() {
+        for color in &[GameCell::Red, GameCell::Yellow] {
+            for y in 0..(BOARD_HEIGHT-3) {
+                for x in 0..(BOARD_WIDTH-3) {
+                    let mut board = [[GameCell::Empty; BOARD_HEIGHT]; BOARD_WIDTH];
+                    for i in 0..4 {
+                        board[x+i][y+(3-i)] = *color;
+                    }
+
+                    let game = GameState {
+                        board,
+                        config: GameConfig::default(),
+                        red_player: User::default(),
+                        yellow_player: User::default(),
+                        reds_turn: true,
+                    };
+
+                    for i in 0..4 {
+                        assert_eq!(game.check_move(y+(3-i), x+i), if *color == GameCell::Yellow {
+                            MoveOutcome::YellowWins
+                        } else {
+                            MoveOutcome::RedWins
+                        });
+                    }
+                }
+            }
+        }
     }
 }
